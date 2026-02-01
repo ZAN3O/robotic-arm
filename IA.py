@@ -95,7 +95,7 @@ class RobotArmEnv(gym.Env):
         
         # State tracking
         self.current_joint_angles = np.zeros(4)
-        self.gripper_state = 0.5  # 0=closed, 1=open
+        self.gripper_state = 1.0  # 0=closed, 1=open (start OPEN)
         self.target_position = np.zeros(3)
         self.object_grasped = False
         self.object_lifted = False
@@ -148,7 +148,7 @@ class RobotArmEnv(gym.Env):
             baseMass=0,
             baseCollisionShapeIndex=table_col,
             baseVisualShapeIndex=table_vis,
-            basePosition=[0.3, 0, 0]
+            basePosition=[0.17, 0, 0]  # Closer to robot base
         )
     
     def _load_robot(self):
@@ -190,9 +190,11 @@ class RobotArmEnv(gym.Env):
         if self.target_object_id is not None:
             p.removeBody(self.target_object_id)
         
-        # Random position on table
-        x = np.random.uniform(0.15, 0.35)
-        y = np.random.uniform(-0.15, 0.15)
+        # Random position on table WITHIN ARM'S REACH
+        # Arm reach is ~0.25-0.28m max (upper_arm 0.13m + forearm 0.15m)
+        # Must spawn cube CLOSER to base!
+        x = np.random.uniform(0.12, 0.22)  # Much closer!
+        y = np.random.uniform(-0.10, 0.10)
         z = 0.02  # On table
         
         self.target_position = np.array([x, y, z])
@@ -276,14 +278,16 @@ class RobotArmEnv(gym.Env):
         return np.array(state[0])
     
     def _is_object_grasped(self) -> bool:
-        """Check if object is being held."""
+        """Check if object is being held - ROBUST detection."""
         if self.target_object_id is None:
             return False
         
-        # Check contacts with both gripper fingers
-        left_contact = False
-        right_contact = False
+        # Method 1: Check gripper is closed
+        if self.gripper_state > 0.4:  # Gripper not closed enough
+            return False
         
+        # Method 2: Check ANY contact between gripper and object
+        contact_count = 0
         for idx in self.gripper_indices:
             contacts = p.getContactPoints(
                 bodyA=self.robot_id,
@@ -291,15 +295,32 @@ class RobotArmEnv(gym.Env):
                 bodyB=self.target_object_id
             )
             if contacts:
-                if 'left' in p.getJointInfo(self.robot_id, idx)[1].decode().lower():
-                    left_contact = True
-                else:
-                    right_contact = True
+                contact_count += 1
         
-        return left_contact and right_contact
+        # Need at least one gripper finger touching
+        if contact_count == 0:
+            return False
+        
+        # Method 3: Check object is close to end effector
+        ee_pos = self._get_end_effector_position()
+        obj_pos, _ = p.getBasePositionAndOrientation(self.target_object_id)
+        distance = np.linalg.norm(np.array(ee_pos) - np.array(obj_pos))
+        
+        # Object must be very close (within 5cm) to be "grasped"
+        return distance < 0.05
     
     def _compute_reward(self) -> Tuple[float, bool, Dict]:
-        """Compute reward with approach-from-above strategy."""
+        """
+        DEFINITIVE reward function for robotic arm grasping.
+        
+        Reward structure:
+        1. Distance reward (continuous)
+        2. Progress reward (getting closer)
+        3. Position bonus (being above object)
+        4. Gripper incentive (close when near)
+        5. Grasp success (sparse bonus)
+        6. Lift success (terminal bonus)
+        """
         reward = 0.0
         terminated = False
         info = {}
@@ -312,86 +333,100 @@ class RobotArmEnv(gym.Env):
         else:
             obj_pos = self.target_position
         
-        # Track object movement (detect bumping)
-        if not hasattr(self, '_initial_obj_pos') or self._initial_obj_pos is None:
-            self._initial_obj_pos = obj_pos.copy()
+        # Cube is 2.5cm, center at z=0.02, so top is at z≈0.03
+        # Gripper should be at top of cube to grasp
+        grasp_target = obj_pos.copy()
+        grasp_target[2] = obj_pos[2] + 0.01  # Slightly into cube for contact
         
-        obj_moved = np.linalg.norm(obj_pos[:2] - self._initial_obj_pos[:2])  # XY movement
+        # ================================================================
+        # 1. DISTANCE REWARD - Main learning signal
+        # ================================================================
+        distance = np.linalg.norm(ee_pos - grasp_target)
         
-        # Distance calculations
-        xy_distance = np.linalg.norm(ee_pos[:2] - obj_pos[:2])  # Horizontal distance
-        z_distance = ee_pos[2] - obj_pos[2]  # Height above object
-        distance_3d = np.linalg.norm(ee_pos - obj_pos)
+        # Continuous distance reward: closer = better
+        # Range [0, 1], with 0.5 at 10cm
+        dist_reward = 1.0 / (1.0 + distance * 10.0)
+        reward += dist_reward * 2.0
         
-        # Track previous distance for progress
+        # ================================================================
+        # 2. PROGRESS REWARD - Reward improvement
+        # ================================================================
         if self._prev_distance is None:
-            self._prev_distance = xy_distance
+            self._prev_distance = distance
         
-        # === PHASE 1: Get above object (XY alignment) ===
-        xy_improvement = self._prev_distance - xy_distance
-        reward += xy_improvement * 15.0  # Strong XY approach signal
-        self._prev_distance = xy_distance
+        improvement = self._prev_distance - distance
+        reward += improvement * 30.0  # Strong gradient
+        self._prev_distance = distance
         
-        # Encourage staying above object level
-        if z_distance > 0.03:  # Above object
-            reward += 0.5  # Small bonus for being above
-        elif z_distance < 0 and xy_distance > 0.04:  # Below object but not aligned
-            reward -= 1.0  # Penalty for diving too early
+        # ================================================================
+        # 3. POSITION BONUS - Encourage top-down approach
+        # ================================================================
+        xy_dist = np.linalg.norm(ee_pos[:2] - obj_pos[:2])
+        z_above = ee_pos[2] - obj_pos[2]  # Height above object
         
-        # === PHASE 2: XY aligned, now descend ===
-        if xy_distance < 0.04:
-            reward += 3.0  # Bonus for XY alignment
+        if xy_dist < 0.08 and z_above > 0:
+            reward += 1.0  # Good position bonus
+        
+        # ================================================================
+        # 4. GRIPPER CONTROL - The critical part!
+        # ================================================================
+        # When close, gripper state matters A LOT
+        if distance < 0.08:
+            # Continuous reward for closing (gripper_state: 1=open, 0=closed)
+            close_reward = (1.0 - self.gripper_state) * 10.0
+            reward += close_reward
             
-            # Encourage descending when aligned
-            if z_distance > 0.02:  # Still above
-                reward -= z_distance * 2.0  # Encourage lowering
-            else:
-                reward += 5.0  # At grasp height!
-                
-                # === PHASE 3: Close gripper ===
-                if self.gripper_state < 0.3:  # Gripper closing
-                    reward += 8.0  # Big bonus for closing gripper at right spot
+            # PENALTY for open gripper when very close
+            if distance < 0.05 and self.gripper_state > 0.5:
+                reward -= 5.0  # Strong penalty: CLOSE IT!
+            
+            # BONUS for closed gripper when very close
+            if distance < 0.05 and self.gripper_state < 0.3:
+                reward += 8.0  # Good job closing!
         
-        # === COLLISION PENALTY ===
-        if obj_moved > 0.02:  # Object moved significantly
-            reward -= 20.0  # Heavy penalty for bumping!
-            info['bumped'] = True
-        
-        # === GRASPING ===
+        # ================================================================
+        # 5. GRASP SUCCESS - Big sparse reward
+        # ================================================================
         is_grasped = self._is_object_grasped()
+        
         if is_grasped and not self.object_grasped:
-            reward += 150.0  # HUGE bonus for grasp
             self.object_grasped = True
+            reward += 200.0  # HUGE reward!
             info['grasped'] = True
             print("🎯 GRASP!")
         
+        # Holding bonus
         if self.object_grasped:
-            reward += 3.0  # Hold bonus
+            reward += 10.0  # Keep holding
         
-        # === LIFTING ===
-        if self.object_grasped and obj_pos[2] > 0.06:
+        # ================================================================
+        # 6. LIFT SUCCESS - Ultimate goal
+        # ================================================================
+        if self.object_grasped and obj_pos[2] > 0.08:  # Lifted 8cm
             if not self.object_lifted:
-                reward += 300.0  # MASSIVE success
                 self.object_lifted = True
-                self.success_count += 1
-                info['lifted'] = True
+                reward += 1000.0  # MASSIVE SUCCESS!
+                info['success'] = True
                 print("🚀 LIFT SUCCESS!")
                 terminated = True
         
-        # Dropping penalty
+        # ================================================================
+        # 7. PENALTIES
+        # ================================================================
+        # Drop penalty
         if self.object_grasped and not is_grasped:
-            reward -= 30.0
             self.object_grasped = False
+            reward -= 50.0
         
-        # Time penalty
-        reward -= 0.05
+        # Time penalty (small)
+        reward -= 0.02
         
+        # Episode limit
         if self.current_step >= self.max_steps:
             terminated = True
         
-        info['distance'] = distance_3d
-        info['xy_dist'] = xy_distance
-        info['object_height'] = obj_pos[2]
+        info['distance'] = distance
+        info['gripper'] = self.gripper_state
         info['success'] = self.object_lifted
         
         return reward, terminated, info
@@ -404,8 +439,7 @@ class RobotArmEnv(gym.Env):
         self.current_step = 0
         self.object_grasped = False
         self.object_lifted = False
-        self._prev_distance = None
-        self._initial_obj_pos = None  # Reset object tracking
+        self._prev_distance = None  # Reset progress tracking
         
         # Reset robot position
         self.current_joint_angles = np.zeros(4)
@@ -419,8 +453,8 @@ class RobotArmEnv(gym.Env):
         # Create new target object
         self._create_target_object()
         
-        # Step simulation to settle
-        for _ in range(50):
+        # Step simulation to settle (reduced for faster training)
+        for _ in range(20):
             p.stepSimulation()
         
         obs = self._get_observation()
@@ -458,11 +492,11 @@ class RobotArmEnv(gym.Env):
         self.gripper_state = (gripper_cmd + 1) / 2  # Convert [-1,1] to [0,1]
         self._set_gripper(self.gripper_state)
         
-        # Step simulation
-        for _ in range(10):
+        # Step simulation (5 substeps for physics - faster training)
+        for _ in range(5):
             p.stepSimulation()
-            if self.render_mode == "human":
-                time.sleep(1./240.)
+        if self.render_mode == "human":
+            time.sleep(1./60.)  # Only sleep in render mode
         
         # Get observation and reward
         obs = self._get_observation()
@@ -488,7 +522,7 @@ class RobotArmEnv(gym.Env):
                 self.robot_id, idx,
                 p.POSITION_CONTROL,
                 targetPosition=target,
-                force=10
+                force=50  # Strong grip
             )
     
     def render(self) -> Optional[np.ndarray]:
