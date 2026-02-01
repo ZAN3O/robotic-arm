@@ -50,7 +50,7 @@ class RobotArmEnv(gym.Env):
     
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
     
-    def __init__(self, render_mode: str = None, max_steps: int = 200):
+    def __init__(self, render_mode: str = None, max_steps: int = 500):
         super().__init__()
         
         self.render_mode = render_mode
@@ -73,8 +73,9 @@ class RobotArmEnv(gym.Env):
         self.joint_limits_low = np.array([-150, -90, -90, -90])
         self.joint_limits_high = np.array([150, 90, 90, 90])
         
-        # Action scaling
-        self.action_scale = 5.0  # Degrees per action step
+        # Action scaling - REDUCED for smoother movements
+        self.action_scale = 4.0  # Slightly increased (was 3.0, orig 5.0)
+        self.action_scale_near = 1.5  # Faster approach (was 1.0)
         
         # Observation space: 14 dimensions
         # [joint_angles(4), gripper(1), ee_pos(3), direction(3), height_diff(1), distance(1), close_flag(1)]
@@ -95,14 +96,22 @@ class RobotArmEnv(gym.Env):
         
         # State tracking
         self.current_joint_angles = np.zeros(4)
+        self.previous_joint_angles = np.zeros(4)  # Track previous for jerk detection
+        self.previous_action = np.zeros(5)  # Track previous action for smoothness
         self.gripper_state = 1.0  # 0=closed, 1=open (start OPEN)
         self.target_position = np.zeros(3)
         self.object_grasped = False
         self.object_lifted = False
+        self.current_ee_velocity = 0.0  # Track end effector speed
         
         # Success tracking
         self.success_count = 0
         self.episode_count = 0
+        self.recent_successes = []  # Track last 20 episodes for curriculum
+        
+        # Curriculum Learning
+        self.difficulty_level = 1  # Start at Level 1 (Easy)
+        print(f"🎓 Environnement initialisé au Niveau {self.difficulty_level}")
         
         # Initialize simulation
         self._setup_simulation()
@@ -190,14 +199,17 @@ class RobotArmEnv(gym.Env):
         if self.target_object_id is not None:
             p.removeBody(self.target_object_id)
         
-        # Random position on table WITHIN ARM'S REACH
-        # Arm reach is ~0.25-0.28m max (upper_arm 0.13m + forearm 0.15m)
-        # Must spawn cube CLOSER to base!
-        x = np.random.uniform(0.12, 0.22)  # Much closer!
-        y = np.random.uniform(-0.10, 0.10)
-        z = 0.02  # On table
+        if self.difficulty_level <= 2:
+            # LEVEL 1 & 2: Fixed position (Calibration spot)
+            x, y, z = 0.15, 0.05, 0.02
+        else:
+            # LEVEL 3: Random position
+            x = np.random.uniform(0.12, 0.22)
+            y = np.random.uniform(-0.10, 0.10)
+            z = 0.02
         
         self.target_position = np.array([x, y, z])
+        self.initial_target_position = self.target_position.copy()  # Store for displacement penalty
         
         # Random color
         colors = [
@@ -421,18 +433,56 @@ class RobotArmEnv(gym.Env):
         # Time penalty (small)
         reward -= 0.02
         
-        # Episode limit
-        if self.current_step >= self.max_steps:
-            terminated = True
+        # ================================================================
+        # 8. SMOOTHNESS PENALTIES - Prevent jerky/violent movements
+        # ================================================================
         
+        # Penalty for high velocity when close to object
+        if distance < 0.10 and hasattr(self, 'current_ee_velocity'):
+            velocity_penalty = self.current_ee_velocity * 50.0  # Penalize speed near object
+            reward -= velocity_penalty
+        
+        # Penalty for jerky movements (large changes in action)
+        if hasattr(self, 'previous_action'):
+            action_change = np.linalg.norm(self.previous_action[:4] - np.zeros(4))  # Assuming action from step
+            jerk_penalty = action_change * 0.1  # Small penalty for erratic movements
+            reward -= jerk_penalty
+        
+        # ================================================================
+        # 9. OBJECT DISPLACEMENT PENALTY - Don't push the cube!
+        # ================================================================
+        # Check if object moved from its original position (pushed it)
+        if not self.object_grasped and hasattr(self, 'initial_target_position'):
+            obj_displacement = np.linalg.norm(obj_pos[:2] - self.initial_target_position[:2])
+            if obj_displacement > 0.03:  # Object moved more than 3cm (was 2cm)
+                reward -= obj_displacement * 50.0  # Reduced penalty (was 100.0)
+                if obj_displacement > 0.10:
+                    reward -= 10.0  # Penalty for really pushing it
+        
+        if terminated and self.object_lifted:
+            self.recent_successes.append(1)
+        elif terminated:
+            self.recent_successes.append(0)
+            
+        # Keep only last 20
+        if len(self.recent_successes) > 20:
+            self.recent_successes.pop(0)
+
         info['distance'] = distance
         info['gripper'] = self.gripper_state
         info['success'] = self.object_lifted
+        info['velocity'] = getattr(self, 'current_ee_velocity', 0.0)
+        info['difficulty'] = self.difficulty_level
         
         return reward, terminated, info
     
+    def set_difficulty(self, level: int):
+        """Set difficulty level manually."""
+        self.difficulty_level = np.clip(level, 1, 3)
+        print(f"🎓 Difficulté changée au Niveau {self.difficulty_level}")
+
     def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
-        """Reset environment."""
+        """Reset environment with CURRICULUM."""
         super().reset(seed=seed)
         
         self.episode_count += 1
@@ -441,7 +491,7 @@ class RobotArmEnv(gym.Env):
         self.object_lifted = False
         self._prev_distance = None  # Reset progress tracking
         
-        # Reset robot position
+        # Reset robot position (Standard)
         self.current_joint_angles = np.zeros(4)
         for i, idx in enumerate(self.joint_indices):
             p.resetJointState(self.robot_id, idx, 0)
@@ -453,22 +503,77 @@ class RobotArmEnv(gym.Env):
         # Create new target object
         self._create_target_object()
         
-        # Step simulation to settle (reduced for faster training)
+        # === CURRICULUM SPAWN LOGIC ===
+        if self.difficulty_level == 1:
+            # LEVEL 1: PERFECT POSITION (Calibrated by User)
+            # Base: 20.5, Shoulder: 41.0, Elbow: 79.0, Wrist: 80.5
+            self.current_joint_angles = np.array([20.5, 41.0, 79.0, 80.5])
+        
+        elif self.difficulty_level == 2:
+            # LEVEL 2: Near Perfect (+/- 15 degrees noise)
+            # Forces the robot to adjust slightly
+            perfect_angles = np.array([20.5, 41.0, 79.0, 80.5])
+            noise = np.random.uniform(-15, 15, size=4)
+            self.current_joint_angles = perfect_angles + noise
+            
+        else:
+            # LEVEL 3: Standard random spawn (zero position)
+            self.current_joint_angles = np.zeros(4)
+
+        # Apply joint angles
+        for i, idx in enumerate(self.joint_indices):
+            p.resetJointState(self.robot_id, idx, np.radians(self.current_joint_angles[i]))
+            
+        # Step simulation to settle
         for _ in range(20):
             p.stepSimulation()
         
         obs = self._get_observation()
-        info = {'success_rate': self.success_count / max(1, self.episode_count)}
+        
+        # Calculate recent success rate
+        rate = 0.0
+        if len(self.recent_successes) > 0:
+            rate = sum(self.recent_successes) / len(self.recent_successes)
+            
+        info = {
+            'success_rate': rate,
+            'difficulty': self.difficulty_level
+        }
         
         return obs, info
     
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Execute action."""
+        """Execute action with adaptive speed control."""
         self.current_step += 1
         
-        # Parse action
-        joint_deltas = action[:4] * self.action_scale  # Scale to degrees
+        # Store previous end effector position for velocity calculation
+        prev_ee_pos = self._get_end_effector_position()
+        
+        # Get distance to target for adaptive speed
+        if self.target_object_id is not None:
+            obj_pos, _ = p.getBasePositionAndOrientation(self.target_object_id)
+            distance_to_target = np.linalg.norm(prev_ee_pos - np.array(obj_pos))
+        else:
+            distance_to_target = 1.0
+        
+        # ADAPTIVE ACTION SCALING - Slower when close!
+        if distance_to_target < 0.05:
+            current_scale = self.action_scale_near * 0.5  # Very slow when very close
+        elif distance_to_target < 0.10:
+            current_scale = self.action_scale_near  # Slow when close
+        elif distance_to_target < 0.15:
+            # Interpolate between near and far scales
+            t = (distance_to_target - 0.10) / 0.05
+            current_scale = self.action_scale_near + t * (self.action_scale - self.action_scale_near)
+        else:
+            current_scale = self.action_scale  # Normal speed when far
+        
+        # Parse action with adaptive scaling
+        joint_deltas = action[:4] * current_scale
         gripper_cmd = action[4]
+        
+        # Store previous for jerk calculation
+        self.previous_joint_angles = self.current_joint_angles.copy()
         
         # Update joint angles
         self.current_joint_angles += joint_deltas
@@ -478,25 +583,33 @@ class RobotArmEnv(gym.Env):
             self.joint_limits_high
         )
         
-        # Apply to robot
+        # Apply to robot with lower velocity for smoother motion
         for i, idx in enumerate(self.joint_indices):
             target_rad = np.radians(self.current_joint_angles[i])
             p.setJointMotorControl2(
                 self.robot_id, idx,
                 p.POSITION_CONTROL,
                 targetPosition=target_rad,
-                force=100
+                force=50,  # Reduced force for smoother motion (was 100)
+                maxVelocity=2.0  # Limit max velocity
             )
         
         # Update gripper
         self.gripper_state = (gripper_cmd + 1) / 2  # Convert [-1,1] to [0,1]
         self._set_gripper(self.gripper_state)
         
-        # Step simulation (5 substeps for physics - faster training)
-        for _ in range(5):
+        # Step simulation (MORE substeps for better physics stability)
+        for _ in range(10):  # Increased from 5 to 10
             p.stepSimulation()
         if self.render_mode == "human":
-            time.sleep(1./60.)  # Only sleep in render mode
+            time.sleep(1./60.)
+        
+        # Calculate end effector velocity
+        current_ee_pos = self._get_end_effector_position()
+        self.current_ee_velocity = np.linalg.norm(current_ee_pos - prev_ee_pos)
+        
+        # Store action for smoothness calculation
+        self.previous_action = action.copy()
         
         # Get observation and reward
         obs = self._get_observation()
@@ -547,87 +660,248 @@ class RobotArmEnv(gym.Env):
             self.physics_client = None
 
 
-def train_agent(total_timesteps: int = 100000, save_path: str = "models/robot_arm_ai"):
-    """Train the RL agent."""
+class AutoSaveCallback:
+    """
+    Callback personnalisé pour sauvegarder le modèle et VecNormalize automatiquement.
+    Permet d'arrêter le training à tout moment sans perdre la progression.
+    """
+    def __init__(self, save_path: str, env, save_freq: int = 2048, verbose: int = 1):
+        self.save_path = save_path
+        self.env = env
+        self.save_freq = save_freq
+        self.verbose = verbose
+        self.n_calls = 0
+        self.last_save_step = 0
+        
+    def __call__(self, locals_dict, globals_dict):
+        """Called at each step."""
+        self.n_calls += 1
+        
+        # Sauvegarder à chaque save_freq steps
+        if self.n_calls - self.last_save_step >= self.save_freq:
+            self.last_save_step = self.n_calls
+            
+            # Récupérer le modèle
+            model = locals_dict.get('self')
+            if model is not None:
+                # Sauvegarder le modèle
+                model.save(self.save_path)
+                
+                # Sauvegarder VecNormalize
+                if self.env is not None:
+                    self.env.save(f"{self.save_path}_vecnorm.pkl")
+                
+                if self.verbose > 0:
+                    print(f"\n💾 Auto-save @ step {self.n_calls:,} -> {self.save_path}.zip")
+        
+        return True  # Continue training
+
+
+def train_agent(total_timesteps: int = 100000, save_path: str = "models/robot_arm_ai", resume: bool = True):
+    """
+    Train the RL agent with automatic checkpointing.
+    
+    Args:
+        total_timesteps: Number of timesteps to train
+        save_path: Path to save the model
+        resume: If True, resume from existing model if available
+    """
     try:
         from stable_baselines3 import PPO
-        from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+        from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
         from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+        from stable_baselines3.common.monitor import Monitor
     except ImportError:
         print("❌ stable-baselines3 non installé!")
         print("   Run: pip install stable-baselines3[extra]")
         return None
+
+    # ... (skipping lines) ...
+
+    # Create new environment
+    # Wrap with Monitor to get 'ep_rew_mean' and 'ep_len_mean' in logs
+    env = DummyVecEnv([lambda: Monitor(RobotArmEnv(render_mode=None, max_steps=500))])
+    env = VecNormalize(env, norm_obs=True, norm_reward=True)
     
+    # === Custom Callback for frequent saves ===
+    class FrequentSaveCallback(BaseCallback):
+        """
+        Sauvegarde le modèle et VecNormalize après chaque rollout (2048 steps).
+        Permet d'arrêter le training à tout moment sans perdre la progression.
+        """
+        def __init__(self, save_path: str, env, verbose: int = 1):
+            super().__init__(verbose)
+            self.save_path = save_path
+            self.env = env
+            self.save_count = 0
+            
+        def _on_rollout_end(self) -> None:
+            """Called after each rollout collection."""
+            self.save_count += 1
+            
+            # Sauvegarder le modèle
+            self.model.save(self.save_path)
+            
+            # Sauvegarder VecNormalize (CRITIQUE pour reprendre le training!)
+            if self.env is not None:
+                self.env.save(f"{self.save_path}_vecnorm.pkl")
+            
+            if self.verbose > 0:
+                current_steps = self.num_timesteps
+                print(f"\n💾 Auto-save #{self.save_count} @ {current_steps:,} steps -> {self.save_path}.zip")
+        
+        def _on_step(self) -> bool:
+            return True
+
+    # === Curriculum Level Manager Callback ===
+    class CurriculumCallback(BaseCallback):
+        """
+        Gère la montée de niveau automatiquement.
+        """
+        def __init__(self, check_freq: int = 2000, verbose: int = 1):
+            super().__init__(verbose)
+            self.check_freq = check_freq
+            
+        def _on_step(self) -> bool:
+            # Check every check_freq steps
+            if self.n_calls % self.check_freq == 0:
+                # Access the environment via training_env
+                # Note: This assumes DummyVecEnv -> Monitor -> RobotArmEnv
+                # We need to access the underlying RobotArmEnv
+                env = self.training_env.envs[0].unwrapped
+                
+                # Check success rate of last 5 episodes
+                if hasattr(env, 'recent_successes') and len(env.recent_successes) >= 5:
+                    rate = sum(env.recent_successes) / len(env.recent_successes)
+                    
+                    print(f"   [Curriculum DEBUG] Rate: {rate:.2f} | Buffer: {list(env.recent_successes)} | Level: {env.difficulty_level}")
+                    
+                    if rate >= 0.8 and env.difficulty_level < 3:
+                        env.difficulty_level += 1
+                        print(f"\n🎉 NIVEAU SUPÉRIEUR ! Success Rate: {rate*100:.1f}% -> Passage au niveau {env.difficulty_level}")
+                        print(f"   La tâche devient plus difficile !")
+                    
+                    if self.verbose > 0:
+                        print(f"   [Curriculum] Level {env.difficulty_level} | Success Rate (last 5): {rate*100:.1f}%")
+            return True
+
     print("=" * 60)
-    print("🧠 ENTRAÎNEMENT IA - Bras Robotique")
+    print("🧠 ENTRAÎNEMENT IA - Bras Robotique (Curriculum Mode)")
     print("=" * 60)
     print(f"   Algorithme: PPO (Proximal Policy Optimization)")
     print(f"   Steps: {total_timesteps:,}")
     print(f"   Save path: {save_path}")
+    print(f"   Auto-save: Toutes les 2048 steps (après chaque rollout)")
     print("=" * 60)
     
     # Create directories
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+    os.makedirs("models/checkpoints", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     
-    # Create environment
-    env = DummyVecEnv([lambda: RobotArmEnv(render_mode=None, max_steps=200)])
-    env = VecNormalize(env, norm_obs=True, norm_reward=True)
+    # Check if we should resume from existing model
+    model_exists = os.path.exists(f"{save_path}.zip")
+    vecnorm_exists = os.path.exists(f"{save_path}_vecnorm.pkl")
     
-    # Create evaluation environment
-    eval_env = DummyVecEnv([lambda: RobotArmEnv(render_mode=None, max_steps=200)])
-    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False)
+    if resume and model_exists and vecnorm_exists:
+        print("\n🔄 Reprise du training depuis le checkpoint existant...")
+        print(f"   Modèle: {save_path}.zip")
+        print(f"   VecNorm: {save_path}_vecnorm.pkl")
+        
+        # Load existing VecNormalize
+        vec_env = DummyVecEnv([lambda: RobotArmEnv(render_mode=None, max_steps=500)])
+        env = VecNormalize.load(f"{save_path}_vecnorm.pkl", vec_env)
+        env.training = True
+        env.norm_reward = True
+        
+        # Load existing model
+        model = PPO.load(save_path, env=env, tensorboard_log="./logs/tensorboard/")
+        print(f"   ✅ Modèle chargé avec succès!")
+    else:
+        if resume and model_exists:
+            print("\n⚠️ Modèle trouvé mais pas de VecNormalize. Nouveau training...")
+        elif resume:
+            print("\n📝 Pas de checkpoint trouvé. Nouveau training...")
+        
+        # Create new environment
+        # Wrap with Monitor to track episode stats (reward, length)
+        env = DummyVecEnv([lambda: Monitor(RobotArmEnv(render_mode=None, max_steps=500))])
+        env = VecNormalize(env, norm_obs=True, norm_reward=True)
+        
+        # Create new model
+        model = PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            verbose=1,
+            tensorboard_log="./logs/tensorboard/",
+            device="cuda"  # Force GPU usage
+        )
     
-    # Callbacks
+    # Create evaluation environment - DISABLED
+    # eval_env = DummyVecEnv([lambda: RobotArmEnv(render_mode=None, max_steps=200)])
+    # eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False)
+    
+    # === Callbacks ===
+    
+    # 0. Curriculum Callback
+    curriculum_callback = CurriculumCallback(check_freq=1000)
+
+    # 1. Auto-save callback (sauvegarde après CHAQUE rollout = 2048 steps)
+    autosave_callback = FrequentSaveCallback(save_path, env, verbose=1)
+    
+    # 2. Checkpoint callback (sauvegarde numérotée toutes les 10000 steps)
     checkpoint_callback = CheckpointCallback(
         save_freq=10000,
         save_path="./models/checkpoints/",
-        name_prefix="robot_arm"
+        name_prefix="robot_arm",
+        save_vecnormalize=True  # Aussi sauvegarder VecNormalize
     )
     
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path="./models/best/",
-        log_path="./logs/",
-        eval_freq=5000,
-        n_eval_episodes=10,
-        deterministic=True
-    )
+    # 3. Evaluation callback - DISABLED
+    # eval_callback = EvalCallback(...)
     
-    # Create model
-    model = PPO(
-        "MlpPolicy",
-        env,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        verbose=1,
-        tensorboard_log="./logs/tensorboard/"
-    )
+    print("\n🚀 Début de l'entraînement...")
+    print("   💡 Vous pouvez arrêter à tout moment avec Ctrl+C")
+    print("   💾 Le modèle est sauvegardé automatiquement!\n")
     
-    print("\n🚀 Début de l'entraînement...\n")
+    try:
+        # Train with all callbacks (EvalCallback removed)
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=[curriculum_callback, autosave_callback, checkpoint_callback],
+            progress_bar=True,
+            reset_num_timesteps=not (resume and model_exists and vecnorm_exists)
+        )
+        
+        # Save final model
+        model.save(save_path)
+        env.save(f"{save_path}_vecnorm.pkl")
+        
+        print(f"\n✅ Entraînement terminé!")
+        print(f"   Modèle sauvegardé: {save_path}.zip")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Entraînement interrompu par l'utilisateur!")
+        print("   💾 Sauvegarde finale en cours...")
+        
+        # Save on interrupt
+        model.save(save_path)
+        env.save(f"{save_path}_vecnorm.pkl")
+        
+        print(f"   ✅ Modèle sauvegardé: {save_path}.zip")
+        print(f"   📝 Pour reprendre: python IA.py --train")
     
-    # Train
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=[checkpoint_callback, eval_callback],
-        progress_bar=True
-    )
-    
-    # Save final model
-    model.save(save_path)
-    env.save(f"{save_path}_vecnorm.pkl")
-    
-    print(f"\n✅ Entraînement terminé!")
-    print(f"   Modèle sauvegardé: {save_path}.zip")
-    
-    env.close()
-    eval_env.close()
+    finally:
+        env.close()
+        # eval_env.close()
     
     return model
 
@@ -659,14 +933,14 @@ def test_agent(model_path: str = "models/robot_arm_ai", episodes: int = 10):
     if os.path.exists(vecnorm_path):
         print(f"   ✅ Normalisation chargée: {vecnorm_path}")
         # Create vectorized env with normalization
-        vec_env = DummyVecEnv([lambda: RobotArmEnv(render_mode="human", max_steps=200)])
+        vec_env = DummyVecEnv([lambda: RobotArmEnv(render_mode="human", max_steps=500)])
         env = VecNormalize.load(vecnorm_path, vec_env)
         env.training = False  # Don't update stats during test
         env.norm_reward = False  # Don't normalize rewards
         use_vec_env = True
     else:
         print(f"   ⚠️ Pas de normalisation trouvée, utilisation raw")
-        env = RobotArmEnv(render_mode="human", max_steps=200)
+        env = RobotArmEnv(render_mode="human", max_steps=500)
         use_vec_env = False
     
     successes = 0
