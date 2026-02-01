@@ -193,20 +193,24 @@ class RobotArmEnv(gym.Env):
                 contactDamping=100,
                 contactStiffness=10000
             )
+
+        # Custom joint limits to prevent "Head in butt" (folding backwards)
+        # Standard limits are [-1.57, 1.57] which allows weird poses.
+        # We restrict them to keep the arm forward-facing.
+        self.joint_limits_low = np.array([-2.6, -1.8, -1.8, -1.8])
+        self.joint_limits_high = np.array([2.6, 0.5, 1.8, 1.8])
     
     def _create_target_object(self):
         """Create a random target object."""
         if self.target_object_id is not None:
             p.removeBody(self.target_object_id)
         
-        if self.difficulty_level <= 2:
-            # LEVEL 1 & 2: Fixed position (Calibration spot)
-            x, y, z = 0.15, 0.05, 0.02
-        else:
-            # LEVEL 3: Random position
-            x = np.random.uniform(0.12, 0.22)
-            y = np.random.uniform(-0.10, 0.10)
-            z = 0.02
+        # Random position on table WITHIN ARM'S REACH
+        # Arm reach is ~0.25-0.28m max.
+        # Adjusted to 0.15-0.26m to avoid spawning INSIDE the robot base/gripper
+        x = np.random.uniform(0.15, 0.26)
+        y = np.random.uniform(-0.12, 0.12)
+        z = 0.02
         
         self.target_position = np.array([x, y, z])
         self.initial_target_position = self.target_position.copy()  # Store for displacement penalty
@@ -279,15 +283,26 @@ class RobotArmEnv(gym.Env):
         ]).astype(np.float32)
         
         return obs
-    
+        
     def _get_end_effector_position(self) -> np.ndarray:
-        """Get end effector position."""
-        # Get the last link state
+        """Get end effector position (FINGERTIPS, not wrist)."""
+        # Get the gripper link state
         if len(self.gripper_indices) > 0:
-            state = p.getLinkState(self.robot_id, self.gripper_indices[0])
+            link_idx = self.gripper_indices[0]
+            state = p.getLinkState(self.robot_id, link_idx)
+            pos = np.array(state[0])
+            orn = np.array(state[1])
+            
+            # The gripper link is the hinge. The fingers extend ~5-6cm from it.
+            # We must add an offset to get the true fingertip centroid.
+            # Assuming Z-axis of gripper link points towards fingers.
+            offset_local = [0, 0, 0.05]  # 5cm offset
+            pos_offset, _ = p.multiplyTransforms(pos, orn, offset_local, [0,0,0,1])
+            return np.array(pos_offset)
         else:
+            # Fallback
             state = p.getLinkState(self.robot_id, self.joint_indices[-1])
-        return np.array(state[0])
+            return np.array(state[0])
     
     def _is_object_grasped(self) -> bool:
         """Check if object is being held - ROBUST detection."""
@@ -491,10 +506,13 @@ class RobotArmEnv(gym.Env):
         self.object_lifted = False
         self._prev_distance = None  # Reset progress tracking
         
-        # Reset robot position (Standard)
-        self.current_joint_angles = np.zeros(4)
+        # Reset robot position to a STABLE "Ready" pose
+        # Instead of vertical (0,0,0,0), we pre-position it above table
+        # Angles: Waist=0, Shoulder=-0.5 (fwd), Elbow=1.0 (bent), Wrist=-0.5 (down)
+        self.current_joint_angles = np.array([0.0, -0.5, 1.0, -0.5])
+        
         for i, idx in enumerate(self.joint_indices):
-            p.resetJointState(self.robot_id, idx, 0)
+            p.resetJointState(self.robot_id, idx, self.current_joint_angles[i])
         
         # Open gripper
         self.gripper_state = 1.0
@@ -590,7 +608,7 @@ class RobotArmEnv(gym.Env):
                 self.robot_id, idx,
                 p.POSITION_CONTROL,
                 targetPosition=target_rad,
-                force=50,  # Reduced force for smoother motion (was 100)
+                force=150,  # STRONG force to hold weight (was 50)
                 maxVelocity=2.0  # Limit max velocity
             )
         
@@ -603,6 +621,24 @@ class RobotArmEnv(gym.Env):
             p.stepSimulation()
         if self.render_mode == "human":
             time.sleep(1./60.)
+            
+            # --- DEBUG VISUALIZATION ---
+            # Line from End Effector to Target
+            # Red = Far, Green = Close/Grasped
+            line_color = [1, 0, 0] if distance_to_target > 0.05 else [0, 1, 0]
+            if self._is_object_grasped():
+                line_color = [0, 0, 1]  # Blue if GRASPED
+                
+            p.addUserDebugLine(prev_ee_pos, obj_pos, line_color, lifeTime=0.1, lineWidth=3)
+            
+            # Text status above robot
+            status_text = f"Dist: {distance_to_target:.3f}m | Grip: {self.gripper_state:.2f}"
+            if self._is_object_grasped():
+                status_text += " | GRASPED!"
+            
+            p.addUserDebugText(status_text, [0, 0, 0.3], [0, 0, 0], lifeTime=0.1, textSize=1.5)
+            
+            # ---------------------------
         
         # Calculate end effector velocity
         current_ee_pos = self._get_end_effector_position()
@@ -615,6 +651,11 @@ class RobotArmEnv(gym.Env):
         obs = self._get_observation()
         reward, terminated, info = self._compute_reward()
         truncated = False
+        
+        # --- CONSOLE LOGGING (User Request) ---
+        if self.render_mode == "human" and self.current_step % 10 == 0:
+            print(f"📉 Step {self.current_step}: Dist={distance_to_target:.3f} | Grip={self.gripper_state:.2f} | Rew={reward:.2f}")
+        # ---------------------------
         
         return obs, reward, terminated, truncated, info
     
@@ -906,7 +947,7 @@ def train_agent(total_timesteps: int = 100000, save_path: str = "models/robot_ar
     return model
 
 
-def test_agent(model_path: str = "models/robot_arm_ai", episodes: int = 10):
+def test_agent(model_path: str = "models/robot_arm_ai", episodes: int = 10, stochastic: bool = False):
     """Test a trained agent with proper normalization."""
     try:
         from stable_baselines3 import PPO
@@ -916,7 +957,7 @@ def test_agent(model_path: str = "models/robot_arm_ai", episodes: int = 10):
         return
     
     print("=" * 60)
-    print("🧪 TEST IA - Bras Robotique")
+    print(f"🧪 TEST IA - Bras Robotique (Stochastic: {stochastic})")
     print("=" * 60)
     
     # Load model
@@ -959,7 +1000,7 @@ def test_agent(model_path: str = "models/robot_arm_ai", episodes: int = 10):
         print(f"\n📺 Episode {ep + 1}/{episodes}")
         
         while not done:
-            action, _ = model.predict(obs, deterministic=True)
+            action, _ = model.predict(obs, deterministic=not stochastic)
             
             if use_vec_env:
                 obs, rewards, dones, infos = env.step(action)
@@ -1035,12 +1076,18 @@ def main():
     parser.add_argument('--model', type=str, default='models/robot_arm_ai',
                         help='Chemin du modèle')
     
+    parser.add_argument('--stochastic', action='store_true',
+                        help='Test stochastique (non déterministe)')
+    
+    parser.add_argument('--resume', action='store_true',
+                        help='Reprendre l\'entraînement depuis le checkpoint')
+    
     args = parser.parse_args()
     
     if args.train:
-        train_agent(total_timesteps=args.steps, save_path=args.model)
+        train_agent(total_timesteps=args.steps, save_path=args.model, resume=args.resume)
     elif args.test:
-        test_agent(model_path=args.model, episodes=args.episodes)
+        test_agent(model_path=args.model, episodes=args.episodes, stochastic=args.stochastic)
     elif args.demo:
         demo_untrained(episodes=args.episodes)
     else:
