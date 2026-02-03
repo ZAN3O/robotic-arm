@@ -118,15 +118,11 @@ class RobotArmEnv(gym.Env):
         
         # 🔥 CURRICULUM DYNAMIQUE
         self.difficulty_level = 1
-        # 🔧 FIX: Start easier (1cm) to unlock dopamine loop
-        self.lift_threshold = 0.01  # Commence à 1cm (TRÈS FACILE)
+        self.lift_threshold = 0.02  # Commence à 2cm (FACILE)
         self.target_lift_threshold = 0.05  # Objectif final 5cm
         
         # 🔥 Curriculum alternance (pour généralisation)
-        # 🔧 FIX: Mode Progressive (controlled by success)
-        self.curriculum_mode = "progressive"  
-        self.level_success_progress = 0 # Track wins for next level
-        self.consecutive_failures = 0   # Track losses for demotion
+        self.curriculum_mode = "progressive"  # "progressive" ou "alternating"
         
         print(f"🎓 Environnement ULTRA initialisé")
         print(f"   Lift threshold: {self.lift_threshold*100:.1f}cm → {self.target_lift_threshold*100:.1f}cm")
@@ -237,11 +233,7 @@ class RobotArmEnv(gym.Env):
                 self.robot_id, gripper_idx,
                 lateralFriction=3.0,
                 rollingFriction=0.01,
-                spinningFriction=0.01,
-                contactStiffness=50000,   # 🔧 FIX: Make gripper HARD
-                contactDamping=100,       # 🔧 FIX: Prevent bouncing
-                linearDamping=0.1,        # Stable movement
-                angularDamping=0.1
+                spinningFriction=0.01
             )
     
     def _create_target_object(self):
@@ -254,18 +246,15 @@ class RobotArmEnv(gym.Env):
             cycle_levels = [1, 1, 2, 1, 2, 3, 2, 1]  # Pattern varié
             cycle_idx = self.episode_count % len(cycle_levels)
             level = cycle_levels[cycle_idx]
-            # 🔧 FIX: Sync internal difficulty level for logging
-            self.difficulty_level = level
         else:
             # Mode progressif standard
             level = self.difficulty_level
         
         # Position selon niveau
         if level == 1:
-            # TRÈS FACILE: Très proche et centré (MAIS avec un tout petit bruit pour éviter l'overfit)
-            # x was fixed, now slightly variable (+/- 0.5cm)
-            x_range = (0.15, 0.17)  
-            y_range = (-0.02, 0.02)
+            # TRÈS FACILE: Très proche et centré
+            x_range = (0.14, 0.18)  # Plus proche qu'avant
+            y_range = (-0.03, 0.03)
         elif level == 2:
             x_range = (0.12, 0.22)
             y_range = (-0.08, 0.08)
@@ -328,10 +317,7 @@ class RobotArmEnv(gym.Env):
         # Gripper
         if len(self.gripper_indices) >= 2:
             left_pos = p.getJointState(self.robot_id, self.gripper_indices[0])[0]
-            # 🔧 FIX: Normalize based on NEW limits (0 to 0.5)
-            # 0.0 = Start (Open) -> State 1.0
-            # 0.5 = End (Closed) -> State 0.0
-            gripper_normalized = 1.0 - (left_pos / 0.5)
+            gripper_normalized = (left_pos + 0.8) / 0.8
             self.gripper_state = np.clip(gripper_normalized, 0, 1)
         
         # EE position
@@ -444,16 +430,13 @@ class RobotArmEnv(gym.Env):
         # ========================================================================
         # 🔥 REWARD COMPONENT 1: APPROACH (Distance-based)
         # ========================================================================
-        # ========================================================================
-        # 🔥 REWARD COMPONENT 1: APPROACH (Distance-based PENALTY)
-        # ========================================================================
-        # 🔧 FIX: Instead of giving points for being close, we SUBTRACT points for being far.
-        # This prevents "happiness from doing nothing".
-        reward -= 2.0 * distance
-        
-        if distance < 0.05:
-            # Small bonus for entering the zone
-            reward += 1.0
+        if distance > 0.05:
+            # Far from object - reward for approaching
+            approach_reward = 2.0 * (1.0 - np.tanh(distance * 5))
+            reward += approach_reward
+        else:
+            # Close to object - bonus for being near
+            reward += 3.0
         
         # ========================================================================
         # 🔥 REWARD COMPONENT 2: CONTACT (With velocity check)
@@ -491,7 +474,11 @@ class RobotArmEnv(gym.Env):
             if lift_height > 0.04:  # 4cm
                 reward += 20.0
             
-            # (Old nested check removed)
+            # 🔥 JACKPOT si seuil atteint
+            if object_lifted:
+                self.object_lifted = True
+                reward += 100.0  # HUGE REWARD (augmenté de 50 à 100)
+                info['success'] = True
             
             # 🔥 Bonus pour mouvement vertical POSITIF
             if self.object_velocity_z > 0.1:  # Monte
@@ -504,17 +491,6 @@ class RobotArmEnv(gym.Env):
                 improvement = lift_height - self.best_lift_this_episode
                 reward += 10.0 * improvement / 0.01  # 10 pts par mm de progrès
                 self.best_lift_this_episode = lift_height
-        
-        # ========================================================================
-        # 🔥 SUCCESS CHECK (DECOUPLED - STRICT BUT FAIR)
-        # ========================================================================
-        # Must be lifted AND grasped (gripper closed + contact)
-        # Relaxed gripper check (0.6) to avoid rejecting valid lifts
-        if object_lifted:
-            self.object_lifted = True
-            reward += 100.0  # HUGE REWARD
-            info['success'] = True
-            print(f"   🎉 SUCCESS DETECTED! Height: {lift_height*100:.1f}cm")
         
         # ========================================================================
         # PENALTIES
@@ -594,10 +570,8 @@ class RobotArmEnv(gym.Env):
             self.gripper_state = 0.9 * self.gripper_state + 0.1 * target_gripper
         
         # Apply gripper
-        # 🔧 PATCH: Correct Signs for URDF Limits (Left 0..0.5, Right -0.5..0)
-        # Closed(0) -> Left=0.5, Right=-0.5
-        left_target = 0.5 * (1 - self.gripper_state)
-        right_target = -0.5 * (1 - self.gripper_state)
+        left_target = -0.8 * (1 - self.gripper_state)
+        right_target = 0.8 * (1 - self.gripper_state)
         
         for i, gripper_idx in enumerate(self.gripper_indices):
             target = left_target if i == 0 else right_target
@@ -656,34 +630,22 @@ class RobotArmEnv(gym.Env):
         self.current_stage = 0
         self.stage_validated = [False, False, False]
         
-        # 🔧 PATCH: STRICT CURRICULUM (User Requested)
-        # 5 Successes (even non-consecutive) -> Level Up
-        # 1 Failure -> Level Down
-        
-        # Check last result (if exists)
-        if self.recent_successes:
-            last_result = self.recent_successes[-1]
+        # 🔥 CURRICULUM: Adapter le seuil de lift
+        if len(self.recent_successes) > 10:
+            success_rate = sum(self.recent_successes[-20:]) / min(20, len(self.recent_successes))
             
-            if last_result == 1:
-                # Success
-                self.level_success_progress += 1
-                self.consecutive_failures = 0  # Reset failure counter
-                if self.level_success_progress >= 5:
-                    if self.difficulty_level < 3:
-                        self.difficulty_level += 1
-                        print(f"\n🚀 LEVEL UP! 5/5 SUCCESSES -> NIVEAU {self.difficulty_level}")
-                    self.level_success_progress = 0 # Reset progress
-            else:
-                # Failure
-                self.consecutive_failures += 1
-                # 🔧 FIX: Allow 3 failures before downgrading (Buffer)
-                if self.difficulty_level > 1 and self.consecutive_failures >= 3:
-                    self.difficulty_level -= 1
-                    print(f"\n❌ TOO MANY FAILURES ({self.consecutive_failures})! DOWNGRADING TO NIVEAU {self.difficulty_level}")
-                    self.level_success_progress = 0
-                    self.consecutive_failures = 0
-                elif self.difficulty_level > 1:
-                    print(f"   ⚠️ Warning: Fail {self.consecutive_failures}/3 at Level {self.difficulty_level}")
+            # Si taux élevé, augmenter progressivement le seuil
+            if success_rate > 0.6 and self.lift_threshold < self.target_lift_threshold:
+                old_threshold = self.lift_threshold
+                self.lift_threshold = min(self.lift_threshold + 0.005, self.target_lift_threshold)
+                if old_threshold != self.lift_threshold:
+                    print(f"   🎯 Lift threshold increased: {old_threshold*100:.1f}cm → {self.lift_threshold*100:.1f}cm")
+            
+            # Log stats periodiquement
+            if self.episode_count % 20 == 0:
+                avg_max_height = np.mean([self.max_object_height_reached] * min(20, len(self.recent_successes)))
+                print(f"   📊 [Env] History: {len(self.recent_successes)} | Rate: {success_rate*100:.0f}% | Level: {self.difficulty_level}")
+                print(f"        Avg max height: {avg_max_height*100:.1f}cm | Threshold: {self.lift_threshold*100:.1f}cm")
         
         # Remove old object
         if self.target_object_id is not None:
@@ -693,8 +655,7 @@ class RobotArmEnv(gym.Env):
         self._create_target_object()
         
         # Reset robot
-        # 🔧 PATCH: Calibrated Values [0.0, 25.3, 112.1, 25.3]
-        home_angles = np.array([0.0, 25.3, 112.1, 25.3])
+        home_angles = np.array([0, 25, 110, 25])
         for i, joint_idx in enumerate(self.joint_indices):
             p.resetJointState(self.robot_id, joint_idx, np.radians(home_angles[i]))
         
@@ -883,17 +844,7 @@ def test_agent(model_path: str = "models/robot_arm_ultra", episodes: int = 10,
             time.sleep(0.01)
         
         total_rewards.append(episode_reward)
-        total_rewards.append(episode_reward)
-        # 🔧 FIX: Read max height from info because env has already reset!
-        # info contains the state of the LAST step before reset
-        max_height = info.get('lift_height', 0.0) 
-        # Actually lift_height in info is current height. We need max. 
-        # The env auto-resets in DummyVecEnv.
-        # Let's rely on info['lift_height'] if success, or estimated.
-        # Better: RobotArmEnv doesn't put max_height in info. Let's add it.
-        # Wait, I can't easily add it to info passed by vec_env without changing step().
-        # But wait, logic: "Max lift" print in step() handles the logging.
-        # This print here is just summary.
+        max_height = env.get_attr('max_object_height_reached')[0]
         max_heights.append(max_height)
         
         if info.get('success', False):
