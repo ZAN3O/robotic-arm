@@ -9,10 +9,12 @@ import zmq
 HOST = "10.0.0.80"
 PORT = 5555
 
-# 5 servo angles: base(pin8), shoulder(pin5), elbow(pin7), wrist_roll(pin6), wrist_yaw(pin4)
+# 6 servos au total :
+#   5 angles bras : base(pin8), shoulder(pin5), elbow(pin7), wrist_roll(pin6), wrist_yaw(pin4)
+#   + 1 gripper   : gripper(pin9) → envoyé séparément ci-dessous
 target_angles = [90, 45, 120, 90, 90]
 
-# Gripper (0=fermé, 180=ouvert, 70=défaut)
+# 6ème servo : Gripper (pin9) - 0=fermé, 180=ouvert, 70=défaut
 gripper = 70
 
 # Speed (1=lent, 100=rapide)
