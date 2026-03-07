@@ -55,7 +55,7 @@ APPROACH_Z = 0.08   # Height to approach from above
 LIFT_Z = 0.12       # Height to lift to after grasp
 
 # Home position for servos (degrees, servo space 0-180)
-HOME_ANGLES = [90, 90, 90, 90, 90]  # base, shoulder, elbow, wrist_pitch, wrist_roll
+HOME_ANGLES = [90, 90, 90, 90, 90]  # base, shoulder, elbow, wrist_roll, wrist_yaw
 HOME_GRIPPER = 70
 DEFAULT_SPEED = 40
 
@@ -73,9 +73,9 @@ def ik_to_servo_angles(ik_angles: list) -> list:
     to servo angles (0-180°, centered on 90°).
     
     IK gives: base_rotation, shoulder, elbow, wrist
-    We need:  base, shoulder, elbow, wrist_pitch, wrist_roll (5 servos)
+    We need:  base, shoulder, elbow, wrist_roll, wrist_yaw (5 servos)
     
-    The 5th servo (wrist_roll) stays at 90° (neutral) unless specified.
+    The 5th servo (wrist_yaw) stays at 90° (neutral) unless specified.
     """
     servo_angles = []
     for angle in ik_angles[:4]:
@@ -84,7 +84,7 @@ def ik_to_servo_angles(ik_angles: list) -> list:
         servo = max(0, min(180, servo))
         servo_angles.append(int(round(servo)))
     
-    # Add wrist_roll at neutral
+    # Add wrist_yaw at neutral
     servo_angles.append(90)
     
     return servo_angles

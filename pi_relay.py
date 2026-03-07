@@ -59,7 +59,7 @@ class ArduinoSerial:
         Send angle command to Arduino.
         
         Args:
-            angles: List of servo angles [base, shoulder, elbow, wrist_pitch, wrist_roll]
+            angles: List of servo angles [base, shoulder, elbow, wrist_roll, wrist_yaw]
             gripper: Gripper angle (0-180)
             speed: Movement speed (1-100)
         

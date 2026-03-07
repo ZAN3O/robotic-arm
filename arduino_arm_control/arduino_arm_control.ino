@@ -5,11 +5,11 @@
  * Receives commands via Serial from Raspberry Pi.
  * 
  * Servo mapping (6 servos):
- *   Pin 4 : Base rotation       (socle)
+ *   Pin 8 : Base rotation       (socle)
  *   Pin 5 : Shoulder            (bas - servo 1)
- *   Pin 6 : Elbow               (bas - servo 2)
- *   Pin 7 : Wrist pitch         (pince - haut/bas)
- *   Pin 8 : Wrist roll          (pince - droite/gauche)
+ *   Pin 7 : Elbow               (bas - servo 2)
+ *   Pin 6 : Wrist roll          (pince - droite/gauche)
+ *   Pin 4 : Wrist yaw           (pince - haut/bas)
  *   Pin 9 : Gripper             (pince - ouvrir/fermer)
  * 
  * Protocol:
@@ -29,11 +29,11 @@
 #define BAUD_RATE 115200
 
 // Servo pins
-const int SERVO_PINS[NUM_SERVOS] = {4, 5, 6, 7, 8, 9};
+const int SERVO_PINS[NUM_SERVOS] = {8, 5, 7, 6, 4, 9};
 
 // Servo names (for debug)
 const char* SERVO_NAMES[NUM_SERVOS] = {
-  "Base", "Shoulder", "Elbow", "WristPitch", "WristRoll", "Gripper"
+  "Base", "Shoulder", "Elbow", "WristRoll", "WristYaw", "Gripper"
 };
 
 // Home position (degrees)
