@@ -18,6 +18,15 @@ import argparse
 import sys
 
 
+# ============================================================================
+# POSITION IDLE (repos) — envoyée au démarrage
+# ============================================================================
+# base(pin8), shoulder(pin5), elbow(pin7), wrist_roll(pin6), wrist_yaw(pin4)
+IDLE_ANGLES = [90, 90, 90, 90, 90]
+IDLE_GRIPPER = 70
+IDLE_SPEED = 30  # Lent pour le démarrage
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Pi Relay: ZMQ → Serial → Arduino")
     parser.add_argument("--port", type=int, default=5555, help="ZMQ port to listen on")
@@ -184,6 +193,11 @@ def main():
     arduino = ArduinoSerial(args.serial, args.baud)
     if not arduino.connect():
         sys.exit(1)
+    
+    # Envoyer la position IDLE au démarrage
+    print(f"\n🏠 Position IDLE au démarrage: {IDLE_ANGLES} gripper={IDLE_GRIPPER}")
+    response = arduino.send_command(IDLE_ANGLES, IDLE_GRIPPER, IDLE_SPEED)
+    print(f"   Réponse: {response}\n")
     
     # Run relay
     run_relay(args.port, arduino)
