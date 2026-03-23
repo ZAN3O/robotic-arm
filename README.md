@@ -21,6 +21,42 @@ Wiring overview:
 
 ![Wiring diagram / hardware view](./medias/wiring.jpeg)
 
+## Hardware Setup
+
+The physical arm was assembled by following the mechanical and electronics approach from the HowToMechatronics tutorial:
+
+[DIY Arduino Robot Arm with Smartphone Control](https://howtomechatronics.com/tutorials/arduino/diy-arduino-robot-arm-with-smartphone-control/)
+
+That reference build is a 3D-printed Arduino robot arm with an external servo power supply and a servo layout based on larger servos for the main arm joints and smaller servos for the wrist and gripper. This project keeps that hardware foundation, but the control architecture has been extended for computer vision and AI-assisted interaction.
+
+### Real hardware architecture
+
+In this setup:
+- the robot is driven by an Arduino Mega
+- the Arduino Mega is connected to a Raspberry Pi
+- the Raspberry Pi runs a relay / bridge process that stays active and listens over Wi-Fi
+- the laptop sends JSON packets to the Raspberry Pi
+- the Raspberry Pi forwards those commands over serial to the Arduino Mega
+
+This split is important because it allows high-level workloads such as Hugging Face inference to run on the computer, while the Raspberry Pi handles network bridging and the Arduino Mega handles low-level servo control.
+
+Data flow:
+
+```text
+Laptop (vision / IK / Hugging Face)
+    -> JSON over Wi-Fi
+Raspberry Pi (bridge client / relay)
+    -> serial
+Arduino Mega
+    -> servo commands
+Robot arm
+```
+
+In this repository, the closest matching files for that stack are:
+- `real_arm_controller.py` for the PC-side real-arm pipeline
+- `pi_relay.py` for the Raspberry Pi ZMQ-to-serial relay
+- `network.py` and `requete.py` for network command transport
+
 ## Overview
 
 Main modules:
