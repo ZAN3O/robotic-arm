@@ -13,9 +13,9 @@ This repository contains both modular building blocks and quick test scripts. Th
 
 ## Media
 
-Assembly / construction video:
+Assembly / construction:
 
-[Watch the build video](./medias/arm_in_construct.mp4)
+![Robot arm assembly / construction](./medias/arm_in_construction.gif)
 
 Wiring overview:
 
