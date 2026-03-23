@@ -15,7 +15,7 @@ This repository contains both modular building blocks and quick test scripts. Th
 
 Assembly / construction video:
 
-[Watch the build video](./medias/arm_in_construct.mov)
+[Watch the build video](./medias/arm_in_construct.mp4)
 
 Wiring overview:
 
