@@ -1,47 +1,47 @@
 # Robotic Arm
 
-Projet de bras robotique 4-DOF avec :
-- cinematique inverse
-- simulation PyBullet
-- detection d'objets par vision classique OpenCV
-- detection open-vocabulary avec modeles Hugging Face
-- commande vocale en francais
-- communication reseau vers Raspberry Pi / Arduino
-- entrainement RL pour le grasping
+4-DOF robotic arm project with:
+- inverse kinematics
+- PyBullet simulation
+- object detection with classical OpenCV vision
+- open-vocabulary detection with Hugging Face models
+- French voice commands
+- network communication to Raspberry Pi / Arduino
+- reinforcement learning for grasping
 
-Le depot contient a la fois des briques modulaires et des scripts de test rapides. Le point important : tout n'est pas encore branche dans une seule pipeline complete, mais chaque sous-systeme peut etre lance et valide separement.
+This repository contains both modular building blocks and quick test scripts. The important point is that not everything is wired into one end-to-end pipeline yet, but each subsystem can be launched and validated independently.
 
-## Vue d'ensemble
+## Overview
 
-Les modules principaux sont :
-- `kinematics.py` : chaine cinematique, IK, limites articulaires
-- `simulation.py` : jumeau numerique PyBullet du bras et de son environnement
-- `perception.py` : detection couleur/forme avec OpenCV
-- `vision.py` : capture camera et homographie pixel -> monde
-- `live_detection.py` : detection temps reel OpenCV, selective, avec trackbars
-- `live_detection_hf.py` : detection open-vocabulary avec Hugging Face
-- `brain_controller.py` : orchestration simulation + reseau + voix + vision
-- `voice_control.py` : reconnaissance vocale Google Speech, optimisee FR
-- `network.py` : envoi des commandes en mode simule ou ZeroMQ
-- `IA.py` : apprentissage par renforcement pour saisir / lever un objet
-- `calibrate.py` : outil PyBullet pour regler la pose et la pince
-- `requete.py` : envoi simple d'une commande ZeroMQ vers le robot
+Main modules:
+- `kinematics.py`: kinematic chain, IK, joint limits
+- `simulation.py`: PyBullet digital twin of the arm and workspace
+- `perception.py`: color/shape detection with OpenCV
+- `vision.py`: camera capture and pixel-to-world homography
+- `live_detection.py`: selective real-time OpenCV detection with trackbars
+- `live_detection_hf.py`: open-vocabulary detection with Hugging Face
+- `brain_controller.py`: orchestration for simulation, network, voice, and vision
+- `voice_control.py`: Google Speech recognition, optimized for French
+- `network.py`: command sending in simulated or ZeroMQ mode
+- `IA.py`: reinforcement learning for grasping and lifting objects
+- `calibrate.py`: PyBullet tool for pose and gripper calibration
+- `requete.py`: simple ZeroMQ command sender to the robot
 
-Documentation locale utile :
+Useful local documentation:
 - `VOICE_CONTROL_GUIDE.md`
 - `ROBOT_ARCHITECTURE_EXPLAINED.md`
 
-## Prerequis
+## Requirements
 
-- Python 3.10+ recommande
+- Python 3.10+ recommended
 - macOS / Linux / Windows
-- Webcam si tu veux tester la vision
-- Micro si tu veux tester la voix
-- Apple Silicon supporte `mps` pour l'inference PyTorch
+- Webcam if you want to test vision
+- Microphone if you want to test voice control
+- Apple Silicon supports `mps` for PyTorch inference
 
 ## Installation
 
-Creation d'un environnement virtuel :
+Create a virtual environment:
 
 ```bash
 python3 -m venv venv
@@ -49,154 +49,154 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 ```
 
-Installation de base pour simulation + vision classique :
+Base install for simulation and classical vision:
 
 ```bash
 pip install numpy opencv-python pybullet ikpy pyzmq pyserial SpeechRecognition gymnasium pillow
 ```
 
-Si tu veux utiliser la detection IA Hugging Face :
+If you want to use Hugging Face object detection:
 
 ```bash
 pip install torch torchvision torchaudio transformers pillow
 ```
 
-Si tu veux utiliser l'entrainement RL :
+If you want to use RL training:
 
 ```bash
 pip install "stable-baselines3[extra]"
 ```
 
-Notes :
-- `pyaudio` peut demander une installation systeme selon la plateforme.
-- Au premier lancement de `live_detection_hf.py`, le modele est telecharge depuis Hugging Face.
+Notes:
+- `pyaudio` may require extra system-level installation depending on your platform.
+- On the first run of `live_detection_hf.py`, the model is downloaded from Hugging Face.
 
-## Demarrage rapide
+## Quick Start
 
-### 1. Demo principale
+### 1. Main demo
 
-Lance le controleur principal en mode demo :
+Run the main controller in demo mode:
 
 ```bash
 python brain_controller.py
 ```
 
-Mode interactif PyBullet :
+Interactive PyBullet mode:
 
 ```bash
 python brain_controller.py --gui
 ```
 
-Mode avec camera initialisee :
+Mode with camera initialized:
 
 ```bash
 python brain_controller.py --camera
 ```
 
-Important :
-- `brain_controller.py --camera` initialise la camera, mais ne fait pas encore une boucle complete de detection live + action robot.
-- Pour tester la vision en direct, utilise plutot `live_detection.py` ou `live_detection_hf.py`.
+Important:
+- `brain_controller.py --camera` initializes the camera, but it does not yet run a full live detection + robot action loop.
+- To test live vision directly, use `live_detection.py` or `live_detection_hf.py`.
 
-### 2. Vision classique OpenCV
+### 2. Classical OpenCV vision
 
-Detection par couleur / forme avec filtres et trackbars :
+Color/shape detection with filters and live trackbars:
 
 ```bash
 python live_detection.py
 ```
 
-Ce script est utile pour :
-- valider la webcam
-- regler la selectivite
-- limiter les faux positifs simples
+This script is useful for:
+- validating the webcam
+- tuning selectivity
+- reducing simple false positives
 
-### 3. Vision IA Hugging Face
+### 3. Hugging Face AI vision
 
-Detection open-vocabulary pour des objets plus complexes, par exemple :
-- stylo
-- cahier
-- colle
-- regle
-- gomme
+Open-vocabulary detection for more complex objects, for example:
+- pen
+- notebook
+- glue
+- ruler
+- eraser
 
-Lancement par defaut :
+Default launch:
 
 ```bash
 python live_detection_hf.py
 ```
 
-Exemple avec labels explicites :
+Example with explicit labels:
 
 ```bash
 python live_detection_hf.py --labels "stylo, cahier, colle, regle, gomme, pen, notebook, glue stick, ruler, eraser"
 ```
 
-Exemple plus leger pour limiter la charge :
+Lighter example to reduce load:
 
 ```bash
 python live_detection_hf.py --infer-width 640 --infer-height 360 --infer-fps 2 --target-fps 15
 ```
 
-Le script :
-- utilise `IDEA-Research/grounding-dino-tiny`
-- essaye `mps` automatiquement sur Mac Apple Silicon
-- affiche le FPS d'affichage et le FPS d'inference
-- permet de regler les seuils via trackbars
+This script:
+- uses `IDEA-Research/grounding-dino-tiny`
+- tries `mps` automatically on Apple Silicon Macs
+- displays render FPS and inference FPS
+- lets you tune thresholds through trackbars
 
-Limite pratique :
-- la detection open-vocabulary est beaucoup plus lourde que l'OpenCV classique
-- le flux video peut rester fluide, mais le nombre de detections par seconde peut rester bas selon le modele et la resolution
+Practical limitation:
+- open-vocabulary detection is much heavier than classical OpenCV detection
+- the video stream can stay smooth while the number of detections per second remains low depending on model and resolution
 
-### 4. Calibration et simulation
+### 4. Calibration and simulation
 
-Outil de calibration manuel dans PyBullet :
+Manual calibration tool in PyBullet:
 
 ```bash
 python calibrate.py
 ```
 
-Test du module perception sans camera :
+Test the perception module without a camera:
 
 ```bash
 python perception.py
 ```
 
-Test du module vision / homographie :
+Test the vision / homography module:
 
 ```bash
 python vision.py
 ```
 
-### 5. Commande vocale
+### 5. Voice control
 
-Mode vocal dans le controleur principal :
+Voice mode in the main controller:
 
 ```bash
 python brain_controller.py --voice
 ```
 
-Le module vocal :
-- ecoute en francais
-- utilise un wake word type `bonjour bras`
-- detecte des intentions du type `prends`, `pose`, `ouvre`, `ferme`, `home`, `stop`
+The voice module:
+- listens in French
+- uses a wake word such as `bonjour bras`
+- detects intents like `pick`, `place`, `open`, `close`, `home`, `stop`
 
-Voir aussi `VOICE_CONTROL_GUIDE.md`.
+See also `VOICE_CONTROL_GUIDE.md`.
 
-### 6. Communication reseau
+### 6. Network communication
 
-Le controleur principal supporte plusieurs modes :
-- `simulated` : affiche seulement les commandes
-- `zmq` : envoi reel via ZeroMQ
-- `serial` : prevu dans l'architecture, a verifier selon ton setup reel
+The main controller supports several modes:
+- `simulated`: prints commands only
+- `zmq`: sends real commands through ZeroMQ
+- `serial`: present in the architecture, to be verified against your real hardware setup
 
-Exemple :
+Examples:
 
 ```bash
 python brain_controller.py --network simulated
 python brain_controller.py --network zmq
 ```
 
-Envoi rapide d'une commande predefinie vers un endpoint ZeroMQ :
+Send a quick predefined command to a ZeroMQ endpoint:
 
 ```bash
 python requete.py
@@ -204,37 +204,37 @@ python requete.py idle
 python requete.py custom
 ```
 
-Pense a verifier l'IP / port dans `requete.py` et `network.py` avant un usage reel.
+Check the IP and port in `requete.py` and `network.py` before using it on real hardware.
 
-### 7. Entrainement IA / RL
+### 7. AI / RL training
 
-Lancement de l'entrainement :
+Start training:
 
 ```bash
 python IA.py --train
 ```
 
-Entrainer plus longtemps :
+Train longer:
 
 ```bash
 python IA.py --train --steps 500000
 ```
 
-Tester un modele entraine :
+Test a trained model:
 
 ```bash
 python IA.py --test
 ```
 
-Visualiser l'environnement :
+Visualize the environment:
 
 ```bash
 python IA.py --demo
 ```
 
-L'entrainement sauvegarde automatiquement dans `models/` et reprend si un checkpoint compatible existe.
+Training auto-saves into `models/` and resumes if a compatible checkpoint already exists.
 
-## Structure du projet
+## Project Structure
 
 ```text
 .
@@ -255,34 +255,34 @@ L'entrainement sauvegarde automatiquement dans `models/` et reprend si un checkp
 ├── arduino_arm.urdf
 ├── models/
 ├── logs/
-└── docs annexes (*.md)
+└── additional docs (*.md)
 ```
 
-## Etat actuel du projet
+## Current Project State
 
-Ce depot est deja utile pour :
-- tester la cinematique et la simulation
-- prototyper la vision classique et la vision IA
-- valider des commandes vocales
-- preparer un pipeline pick-and-place
+This repository is already useful for:
+- testing kinematics and simulation
+- prototyping classical and AI-based vision
+- validating voice commands
+- preparing a pick-and-place pipeline
 
-En revanche, il faut garder en tete que :
-- la detection camera live est aujourd'hui principalement testee via des scripts dedies
-- la detection Hugging Face n'est pas encore connectee automatiquement a une boucle complete de grasping
-- certaines parties reseau / hardware dependent encore de ton setup reel
+Still, keep these limitations in mind:
+- live camera detection is currently tested mainly through dedicated scripts
+- Hugging Face detection is not yet automatically connected to a full grasping loop
+- some network / hardware parts still depend on your physical setup
 
-## Fichiers a lire ensuite
+## Files Worth Reading Next
 
-Si tu veux comprendre le projet sans tout ouvrir dans l'IDE :
-- `ROBOT_ARCHITECTURE_EXPLAINED.md` pour la logique globale
-- `VOICE_CONTROL_GUIDE.md` pour le vocal
-- `simulation.py` pour le jumeau numerique
-- `live_detection_hf.py` pour la vision moderne
+If you want to understand the project without opening everything in the IDE:
+- `ROBOT_ARCHITECTURE_EXPLAINED.md` for the overall logic
+- `VOICE_CONTROL_GUIDE.md` for the voice stack
+- `simulation.py` for the digital twin
+- `live_detection_hf.py` for the modern vision path
 
-## Pistes d'amelioration
+## Suggested Next Steps
 
-Les prochaines etapes logiques seraient :
-- ajouter un vrai `requirements.txt` ou `pyproject.toml`
-- brancher la detection live au `brain_controller`
-- sauvegarder la calibration camera dans un fichier
-- ajouter un mode pick-and-place base sur les detections Hugging Face
+Logical next improvements would be:
+- add a proper `requirements.txt` or `pyproject.toml`
+- connect live detection to `brain_controller.py`
+- save camera calibration to a file
+- add a pick-and-place mode driven by Hugging Face detections
