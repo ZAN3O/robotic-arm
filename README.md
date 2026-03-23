@@ -23,9 +23,7 @@ Wiring overview:
 
 ## Hardware Setup
 
-The printed arm geometry is based on the 3D model published by HowToMechatronics:
-
-[DIY Arduino Robot Arm with Smartphone Control](https://howtomechatronics.com/tutorials/arduino/diy-arduino-robot-arm-with-smartphone-control/)
+The printed arm geometry is based on the 3D model published by HowToMechatronics
 
 For this project, that source is used as the reference for the mechanical 3D model only. The software stack, networking, computer vision pipeline, and Raspberry Pi bridge used in this repository are custom to this project.
 
