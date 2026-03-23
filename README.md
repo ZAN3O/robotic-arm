@@ -23,33 +23,47 @@ Wiring overview:
 
 ## Hardware Setup
 
-The physical arm was assembled by following the mechanical and electronics approach from the HowToMechatronics tutorial:
+The printed arm geometry is based on the 3D model published by HowToMechatronics:
 
 [DIY Arduino Robot Arm with Smartphone Control](https://howtomechatronics.com/tutorials/arduino/diy-arduino-robot-arm-with-smartphone-control/)
 
-That reference build is a 3D-printed Arduino robot arm with an external servo power supply and a servo layout based on larger servos for the main arm joints and smaller servos for the wrist and gripper. This project keeps that hardware foundation, but the control architecture has been extended for computer vision and AI-assisted interaction.
+For this project, that source is used as the reference for the mechanical 3D model only. The software stack, networking, computer vision pipeline, and Raspberry Pi bridge used in this repository are custom to this project.
 
-### Real hardware architecture
+Reference mechanical model:
+- 5-DOF printed arm
+- MG996R servos for the first 3 axes: waist, shoulder, elbow
+- SG90 micro servos for wrist roll, wrist pitch, and gripper
+- original STL / 3D model source linked from the HowToMechatronics article
 
-In this setup:
-- the robot is driven by an Arduino Mega
-- the Arduino Mega is connected to a Raspberry Pi
-- the Raspberry Pi runs a relay / bridge process that stays active and listens over Wi-Fi
-- the laptop sends JSON packets to the Raspberry Pi
-- the Raspberry Pi forwards those commands over serial to the Arduino Mega
+Actual hardware used in this project:
+- 3D-printed robot arm based on that reference model
+- Arduino Mega for low-level servo control
+- Raspberry Pi connected to the Arduino Mega
+- an always-on `bridge_client` / relay process on the Raspberry Pi
+- laptop running vision, Hugging Face models, homography, and IK
+- camera connected to the laptop for object detection
 
-This split is important because it allows high-level workloads such as Hugging Face inference to run on the computer, while the Raspberry Pi handles network bridging and the Arduino Mega handles low-level servo control.
+### Hardware topology
 
-Data flow:
+```mermaid
+flowchart LR
+    CAM["Camera"] --> LAP["Laptop / MacBook Pro<br/>Vision + Homography + IK + Hugging Face"]
+    LAP -- "JSON over Wi-Fi" --> PI["Raspberry Pi<br/>bridge_client / relay"]
+    PI -- "USB serial" --> MEGA["Arduino Mega"]
+    MEGA -- "servo commands" --> ARM["3D-printed robot arm"]
+```
 
-```text
-Laptop (vision / IK / Hugging Face)
-    -> JSON over Wi-Fi
-Raspberry Pi (bridge client / relay)
-    -> serial
-Arduino Mega
-    -> servo commands
-Robot arm
+### Data flow
+
+```mermaid
+flowchart LR
+    FRAME["Camera frame"] --> DET["Object detection<br/>OpenCV or Hugging Face"]
+    DET --> CAL["Pixel-to-world mapping<br/>Homography"]
+    CAL --> IK["Inverse kinematics"]
+    IK --> CMD["Command builder<br/>JSON packet"]
+    CMD -- "Wi-Fi" --> PI["Raspberry Pi bridge"]
+    PI -- "serial" --> ARD["Arduino Mega"]
+    ARD --> ACT["Servos / robot arm motion"]
 ```
 
 In this repository, the closest matching files for that stack are:
