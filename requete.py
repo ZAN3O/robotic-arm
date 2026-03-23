@@ -21,7 +21,7 @@ PORT = 5555
 
 POSITIONS = {
     "idle": {
-        "angles": [90, 90, 90, 90, 90],
+        "angles": [30, 180, 120, 0, 90],
         "gripper": 70,
         "speed": 30,
         "description": "🏠 Position repos (idle)"
