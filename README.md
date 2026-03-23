@@ -11,6 +11,16 @@
 
 This repository contains both modular building blocks and quick test scripts. The important point is that not everything is wired into one end-to-end pipeline yet, but each subsystem can be launched and validated independently.
 
+## Media
+
+Assembly / construction video:
+
+[Watch the build video](./medias/arm_in_construct.mov)
+
+Wiring overview:
+
+![Wiring diagram / hardware view](./medias/wiring.jpeg)
+
 ## Overview
 
 Main modules:
@@ -253,6 +263,7 @@ Training auto-saves into `models/` and resumes if a compatible checkpoint alread
 ├── vision.py
 ├── voice_control.py
 ├── arduino_arm.urdf
+├── medias/
 ├── models/
 ├── logs/
 └── additional docs (*.md)
